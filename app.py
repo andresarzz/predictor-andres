@@ -2,10 +2,11 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 from scipy.stats import poisson, norm
+import plotly.graph_objects as go
 import plotly.express as px
 
 # --- CONFIGURACIÓN DE LA PÁGINA ---
-st.set_page_config(page_title="Predictor Elite", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Predictor Elite", page_icon="⚡", layout="wide")
 
 # --- FUNCIONES MATEMÁTICAS ---
 def calcular_poisson_ou(esperado, linea):
@@ -33,37 +34,50 @@ def prop_baloncesto_norm(promedio, desviacion, linea):
     prob_under = norm.cdf(linea, loc=promedio, scale=desviacion)
     return round(prob_under * 100, 2), round((1 - prob_under) * 100, 2)
 
+def calcular_kelly(prob_real, cuota_bookie):
+    """Calcula el porcentaje de banca a apostar según el Criterio de Kelly (fraccionado 1/4)."""
+    if cuota_bookie <= 1.0: return 0.0
+    p = prob_real / 100
+    q = 1 - p
+    b = cuota_bookie - 1
+    kelly_pct = ((p * b) - q) / b
+    # Recomendamos un cuarto de Kelly para proteger la banca
+    return max(0, round((kelly_pct * 100) / 4, 2))
+
 # --- INTERFAZ PRINCIPAL ---
-st.title("🏦 Sistema Predictivo y Gestión de Capital")
+st.title("⚡ Motor Cuantitativo de Análisis Deportivo")
+st.markdown("Evaluación estadística avanzada para mercados de fútbol y baloncesto.")
 
 # --- TABS PRINCIPALES ---
-tab_futbol, tab_baloncesto, tab_escaner, tab_finanzas = st.tabs([
-    "⚽ Fútbol (Análisis Total)", 
+tab_futbol, tab_graficos, tab_baloncesto, tab_escaner = st.tabs([
+    "⚽ Fútbol (Mercados)", 
+    "📊 Gráficos de Distribución",
     "🏀 Baloncesto (Props)", 
-    "🎯 Escáner de Valor", 
-    "📈 Plan Financiero 30 Días"
+    "🎯 Escáner de Valor (+EV & Kelly)"
 ])
+
+# ==========================================
+# BARRA LATERAL (DATOS GLOBALES DE FÚTBOL)
+# ==========================================
+st.sidebar.header("⚙️ Entrada de Datos (Fútbol)")
+col_sf1, col_sf2 = st.sidebar.columns(2)
+with col_sf1:
+    st.subheader("Local")
+    xg_l = st.number_input("xG Local", value=1.6, step=0.1)
+    cl = st.number_input("Córners L", value=5.5, step=0.1)
+    dl = st.number_input("Remates Tot. L", value=12.0, step=0.5)
+    dpl = st.number_input("A Puerta L", value=4.5, step=0.1)
+with col_sf2:
+    st.subheader("Visita")
+    xg_v = st.number_input("xG Visita", value=1.2, step=0.1)
+    cv = st.number_input("Córners V", value=4.2, step=0.1)
+    dv = st.number_input("Remates Tot. V", value=10.0, step=0.5)
+    dpv = st.number_input("A Puerta V", value=3.2, step=0.1)
 
 # ==========================================
 # TAB 1: FÚTBOL (GOLES, CÓRNERS, REMATES)
 # ==========================================
 with tab_futbol:
-    st.sidebar.header("📊 Promedios Fútbol")
-    col_sf1, col_sf2 = st.sidebar.columns(2)
-    with col_sf1:
-        st.subheader("Local")
-        xg_l = st.number_input("xG Local", value=1.6, step=0.1)
-        cl = st.number_input("Córners L", value=5.5, step=0.1)
-        dl = st.number_input("Remates Tot. L", value=12.0, step=0.5)
-        dpl = st.number_input("A Puerta L", value=4.5, step=0.1)
-    with col_sf2:
-        st.subheader("Visita")
-        xg_v = st.number_input("xG Visita", value=1.2, step=0.1)
-        cv = st.number_input("Córners V", value=4.2, step=0.1)
-        dv = st.number_input("Remates Tot. V", value=10.0, step=0.5)
-        dpv = st.number_input("A Puerta V", value=3.2, step=0.1)
-
-    # Sub-tabs para organizar los mercados de fútbol
     sub_goles, sub_corners, sub_remates = st.tabs(["🥅 Goles", "🚩 Córners", "👟 Remates y Puerta"])
     
     with sub_goles:
@@ -114,7 +128,26 @@ with tab_futbol:
             st.metric(f"Visita Over {l_dpv}", f"{o_dpv}%")
 
 # ==========================================
-# TAB 2: BALONCESTO & PLAYER PROPS
+# TAB 2: GRÁFICOS VISUALES (POISSON)
+# ==========================================
+with tab_graficos:
+    st.header("Distribución de Probabilidad Exacta")
+    st.markdown("Visualiza la probabilidad de que un equipo anote exactamente X cantidad de goles.")
+    
+    goles_posibles = list(range(6))
+    prob_l = [poisson.pmf(i, xg_l) * 100 for i in goles_posibles]
+    prob_v = [poisson.pmf(i, xg_v) * 100 for i in goles_posibles]
+    
+    fig = go.Figure(data=[
+        go.Bar(name='Local', x=goles_posibles, y=prob_l, marker_color='#1f77b4', text=[f"{p:.1f}%" for p in prob_l], textposition='auto'),
+        go.Bar(name='Visitante', x=goles_posibles, y=prob_v, marker_color='#ff7f0e', text=[f"{p:.1f}%" for p in prob_v], textposition='auto')
+    ])
+    fig.update_layout(barmode='group', xaxis_title='Goles Exactos', yaxis_title='Probabilidad (%)',
+                      title="Comparativa de Fuerza Ofensiva (xG)")
+    st.plotly_chart(fig, use_container_width=True)
+
+# ==========================================
+# TAB 3: BALONCESTO & PLAYER PROPS
 # ==========================================
 with tab_baloncesto:
     st.header("Análisis de Player Props (Baloncesto)")
@@ -124,7 +157,7 @@ with tab_baloncesto:
     with col_b2:
         desviacion_std = st.number_input("Desviación Estándar", value=4.5, step=0.1)
     with col_b3:
-        linea_prop = st.select_slider("Línea de la Casa", options=[i/2 for i in range(10, 81)], value=23.5)
+        linea_prop = st.select_slider("Línea de la Casa (Baloncesto)", options=[i/2 for i in range(10, 81)], value=23.5)
         
     u_prop, o_prop = prop_baloncesto_norm(promedio_jugador, desviacion_std, linea_prop)
     cb1, cb2 = st.columns(2)
@@ -132,65 +165,38 @@ with tab_baloncesto:
     cb2.metric(f"Under {linea_prop}", f"{u_prop}%")
 
 # ==========================================
-# TAB 3: ESCÁNER DE VALOR
+# TAB 4: ESCÁNER DE VALOR Y GESTIÓN DE RIESGO
 # ==========================================
 with tab_escaner:
-    st.header("Evaluador de Cuotas de Bajo Riesgo")
-    cuota_ofrecida = st.number_input("Cuota a evaluar (ej: DoradoBet)", min_value=1.01, value=1.30, step=0.01)
-    prob_requerida = (1 / cuota_ofrecida) * 100
-    st.info(f"Para que la cuota de **{cuota_ofrecida}** sea rentable, el modelo en la pestaña de análisis debe mostrar una probabilidad mayor al **{round(prob_requerida, 2)}%**.")
-
-# ==========================================
-# TAB 4: PLAN FINANCIERO CORREGIDO
-# ==========================================
-with tab_finanzas:
-    st.header("Proyección de Bankroll y Retiros Lógicos")
+    st.header("Escáner de Valor Esperado (+EV) y Stake")
+    st.markdown("Ideal para evaluar rápidamente cuotas de bajo riesgo (ej. 1.30) en slates de múltiples partidos.")
     
-    col_fin1, col_fin2, col_fin3 = st.columns(3)
-    with col_fin1:
-        capital_inicial = st.number_input("Capital Inicial (Colones)", min_value=100, value=2000, step=500)
-    with col_fin2:
-        crecimiento_diario = st.number_input("Crecimiento Diario (%)", min_value=0.1, value=2.5, step=0.1)
-    with col_fin3:
-        porcentaje_retiro = st.number_input("Retiro Semanal (% de Utilidad)", min_value=0.0, value=50.0, step=5.0)
-
-    # LÓGICA CORREGIDA
-    dias = []
-    bankroll_actual = capital_inicial
-    base_semana = capital_inicial
-    retiros_totales = 0
-    
-    for dia in range(1, 31):
-        ganancia_del_dia = bankroll_actual * (crecimiento_diario / 100)
-        bankroll_actual += ganancia_del_dia
-        retiro_hoy = 0
+    col_esc1, col_esc2 = st.columns(2)
+    with col_esc1:
+        prob_modelo = st.number_input("Probabilidad Real calculada por el modelo (%)", min_value=1.0, max_value=99.9, value=80.0, step=0.5)
+    with col_esc2:
+        cuota_bookie = st.number_input("Cuota ofrecida en la casa de apuestas", min_value=1.01, value=1.30, step=0.01)
         
-        # Evaluar el día 7 de cada ciclo
-        if dia % 7 == 0:
-            utilidad_semana = bankroll_actual - base_semana
-            if utilidad_semana > 0:
-                retiro_hoy = utilidad_semana * (porcentaje_retiro / 100)
-                bankroll_actual -= retiro_hoy
-                retiros_totales += retiro_hoy
-            # Resetear la base para medir el rendimiento de la nueva semana
-            base_semana = bankroll_actual 
-                
-        dias.append({
-            "Día": dia,
-            "Bankroll (₡)": round(bankroll_actual, 2),
-            "Utilidad del Día (₡)": round(ganancia_del_dia, 2),
-            "Retiro a Banco (₡)": round(retiro_hoy, 2)
-        })
-        
-    df_finanzas = pd.DataFrame(dias)
+    prob_implicita = (1 / cuota_bookie) * 100
+    ev = ( (prob_modelo / 100) * cuota_bookie ) - 1
+    kelly_recomendado = calcular_kelly(prob_modelo, cuota_bookie)
     
-    st.success(f"**Beneficio Extraído (Retiros Totales en 30 días):** ₡ {round(retiros_totales, 2)}")
-    st.dataframe(df_finanzas, use_container_width=True, hide_index=True)
+    st.divider()
+    
+    if ev > 0:
+        st.success(f"✅ **VENTAJA MATEMÁTICA DETECTADA**")
+        res1, res2, res3 = st.columns(3)
+        res1.metric("Valor Esperado (+EV)", f"+{round(ev * 100, 2)}%")
+        res2.metric("Probabilidad Implícita", f"{round(prob_implicita, 2)}%", "La casa asume esta probabilidad", delta_color="off")
+        res3.metric("Stake Sugerido (Kelly %)", f"{kelly_recomendado}%", "Porcentaje de tu bankroll a invertir")
+    else:
+        st.error(f"❌ **SIN VALOR (EV NEGATIVO)**")
+        st.write(f"La cuota de {cuota_bookie} exige una probabilidad mínima de {round(prob_implicita, 2)}%, pero el modelo solo otorga {prob_modelo}%. A largo plazo, apostar aquí genera pérdidas.")
 
 # --- FOOTER ---
 st.markdown("---")
 st.markdown("""
     <div style='text-align: center; color: #888; padding: 20px;'>
-        <p style='font-size: 16px;'>Creado por <strong>Andres Araya</strong> | 🏦 Sistema Predictivo Institucional</p>
+        <p style='font-size: 16px;'>Creado por <strong>Andres Araya</strong> | ⚡ Predictor Estadístico PRO</p>
     </div>
 """, unsafe_allow_html=True)
