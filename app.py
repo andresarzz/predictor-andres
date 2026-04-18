@@ -1,214 +1,116 @@
 import streamlit as st
 import numpy as np
 import requests
-from scipy.stats import poisson, norm
-import plotly.graph_objects as go
+import pandas as pd
+from scipy.stats import poisson
 
-# --- CONFIGURACIÓN DE LA PÁGINA ---
-st.set_page_config(page_title="Predictor Elite PRO", page_icon="🔒", layout="wide")
+# --- CONFIGURACIÓN ---
+st.set_page_config(page_title="Predictor Automático PRO", layout="wide")
 
-# --- SISTEMA DE SESIÓN (LOGIN) ---
-if 'logueado' not in st.session_state:
-    st.session_state.logueado = False
+# --- FUNCIONES DE API (FOOTBALL-API) ---
+def call_api(endpoint, api_key, params=None):
+    url = f"https://v3.football.api-sports.io/{endpoint}"
+    headers = {'x-rapidapi-host': "v3.football.api-sports.io", 'x-rapidapi-key': api_key}
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        return response.json()
+    except:
+        return None
 
-# --- FUNCIONES MATEMÁTICAS ---
-def calcular_poisson_ou(esperado, linea):
-    if linea % 1 == 0:
-        prob_under = sum(poisson.pmf(i, esperado) for i in range(int(linea)))
-    else:
-        prob_under = sum(poisson.pmf(i, esperado) for i in range(int(linea + 0.5)))
-    return round(prob_under * 100, 2), round((1 - prob_under) * 100, 2)
+def get_leagues(api_key):
+    data = call_api("leagues", api_key, {"current": "true"})
+    if data and 'response' in data:
+        return {item['league']['name']: item['league']['id'] for item in data['response']}
+    return {}
 
-def matriz_dixon_coles(lambda_l, lambda_v, rho=-0.15, max_goles=6):
-    matriz = np.zeros((max_goles+1, max_goles+1))
-    for i in range(max_goles+1):
-        for j in range(max_goles+1):
-            prob_base = poisson.pmf(i, lambda_l) * poisson.pmf(j, lambda_v)
-            if i == 0 and j == 0: ajuste = 1 - (lambda_l * lambda_v * rho)
-            elif i == 1 and j == 0: ajuste = 1 + (lambda_v * rho)
-            elif i == 0 and j == 1: ajuste = 1 + (lambda_l * rho)
-            elif i == 1 and j == 1: ajuste = 1 - rho
-            else: ajuste = 1.0
-            matriz[i][j] = max(0, prob_base * ajuste)
+def get_fixtures(api_key, league_id, season=2025):
+    # Trae partidos próximos (próximos 10)
+    data = call_api("fixtures", api_key, {"league": league_id, "season": season, "next": 10})
+    if data and 'response' in data:
+        return {f"{item['teams']['home']['name']} vs {item['teams']['away']['name']}": item for item in data['response']}
+    return {}
+
+def get_team_stats(api_key, league_id, season, team_id):
+    data = call_api("teams/statistics", api_key, {"league": league_id, "season": season, "team": team_id})
+    if data and 'response' in data:
+        s = data['response']
+        pj = s['fixtures']['played']['total']
+        if pj == 0: return None
+        return {
+            "goles": s['goals']['for']['average']['total'],
+            "corners": 5.0, # Valor por defecto si la API free no lo detalla en este endpoint
+            "remates": 12.0
+        }
+    return None
+
+# --- LÓGICA DE CÁLCULO ---
+def matriz_dixon_coles(l_l, l_v, rho=-0.15):
+    matriz = np.zeros((7, 7))
+    for i in range(7):
+        for j in range(7):
+            prob = poisson.pmf(i, float(l_l)) * poisson.pmf(j, float(l_v))
+            # Ajuste simplificado de Dixon-Coles
+            if i == 0 and j == 0: prob *= (1 - (l_l * l_v * rho))
+            elif i == 1 and j == 1: prob *= (1 - rho)
+            matriz[i][j] = max(0, prob)
     return matriz / matriz.sum()
 
-def prop_baloncesto_norm(promedio, desviacion, linea):
-    prob_under = norm.cdf(linea, loc=promedio, scale=desviacion)
-    return round(prob_under * 100, 2), round((1 - prob_under) * 100, 2)
+# --- INTERFAZ ---
+st.title("🚀 Predictor Automático SaaS v5.0")
+st.sidebar.header("🔑 Configuración de Datos")
+api_key = st.sidebar.text_input("Ingresa tu API Key de API-Football", type="password")
 
-# --- FUNCIÓN DE CONEXIÓN A API-FOOTBALL ---
-def obtener_stats_equipo(api_key, league_id, season, team_id):
-    """Extrae las estadísticas promedio de un equipo desde API-Football."""
-    url = f"https://v3.football.api-sports.io/teams/statistics?league={league_id}&season={season}&team={team_id}"
-    headers = {
-        'x-rapidapi-host': "v3.football.api-sports.io",
-        'x-rapidapi-key': api_key
-    }
-    
-    try:
-        response = requests.get(url, headers=headers)
-        data = response.json()
+if api_key:
+    # 1. Seleccionar Liga
+    leagues_dict = get_leagues(api_key)
+    if leagues_dict:
+        sel_league_name = st.sidebar.selectbox("1. Elige una Liga", list(leagues_dict.keys()))
+        league_id = leagues_dict[sel_league_name]
         
-        if data['errors']:
-            return None, "Error en la API o Key inválida."
+        # 2. Seleccionar Partido
+        fixtures_dict = get_fixtures(api_key, league_id)
+        if fixtures_dict:
+            sel_match = st.sidebar.selectbox("2. Selecciona un Partido Próximo", list(fixtures_dict.keys()))
+            match_data = fixtures_dict[sel_match]
             
-        stats = data['response']
-        # Partidos jugados para sacar promedios
-        partidos = stats['fixtures']['played']['total']
-        if partidos == 0: return None, "El equipo no ha jugado partidos."
-        
-        # Extraer totales y promediar
-        goles_favor = stats['goals']['for']['total']['total']
-        goles_contra = stats['goals']['against']['total']['total']
-        
-        promedios = {
-            'goles_favor': round(goles_favor / partidos, 2),
-            'goles_contra': round(goles_contra / partidos, 2)
-        }
-        return promedios, "Éxito"
-    except Exception as e:
-        return None, str(e)
-
-# ==========================================
-# PANTALLA DE LOGIN
-# ==========================================
-if not st.session_state.logueado:
-    st.markdown("<h1 style='text-align: center;'>⚡ Predictor Elite Analytics</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center;'>Plataforma institucional de apuestas cuantitativas.</p>", unsafe_allow_html=True)
-    
-    col_login1, col_login2, col_login3 = st.columns([1, 1, 1])
-    with col_login2:
-        st.info("🔐 Acceso exclusivo para suscriptores VIP")
-        usuario = st.text_input("Usuario")
-        password = st.text_input("Contraseña", type="password")
-        
-        if st.button("Iniciar Sesión", use_container_width=True):
-            st.session_state.logueado = True
-            st.rerun()
-            
-    st.markdown("---")
-    st.markdown("""
-    <div style='text-align: center; color: #888;'>
-        <p style='font-size: 14px;'>Creado por <strong>Andres Araya</strong> | © 2026</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-# ==========================================
-# INTERFAZ PRINCIPAL (VIP)
-# ==========================================
-else:
-    st.sidebar.success("✅ Sesión Iniciada")
-    if st.sidebar.button("Cerrar Sesión"):
-        st.session_state.logueado = False
-        st.rerun()
-
-    # --- MÓDULO DE EXTRACCIÓN API ---
-    st.sidebar.header("📡 Automatización API-Football")
-    usar_api = st.sidebar.checkbox("Usar extracción automática")
-    
-    if usar_api:
-        api_key_user = st.sidebar.text_input("Tu API Key", type="password")
-        st.sidebar.caption("Ejemplo: Premier League = 39, Temporada = 2025")
-        col_api1, col_api2 = st.sidebar.columns(2)
-        league = col_api1.text_input("ID Liga", value="39")
-        season = col_api2.text_input("Año", value="2025")
-        
-        team_l = st.sidebar.text_input("ID Equipo Local (Ej: 33 para Man Utd)")
-        team_v = st.sidebar.text_input("ID Equipo Visita (Ej: 34 para Newcastle)")
-        
-        if st.sidebar.button("Extraer Datos Reales"):
-            if api_key_user and team_l and team_v:
-                with st.spinner("Conectando con API-Football..."):
-                    stats_l, msg_l = obtener_stats_equipo(api_key_user, league, season, team_l)
-                    stats_v, msg_v = obtener_stats_equipo(api_key_user, league, season, team_v)
+            if st.sidebar.button("⚡ Analizar Partido"):
+                with st.spinner("Extrayendo estadísticas y calculando valor..."):
+                    id_home = match_data['teams']['home']['id']
+                    id_away = match_data['teams']['away']['id']
+                    season = match_data['league']['season']
                     
-                    if stats_l and stats_v:
-                        st.sidebar.success("Datos extraídos con éxito. xG actualizado.")
-                        # Usamos los goles promedio de la API para alimentar el modelo
-                        xg_l_val = stats_l['goles_favor']
-                        xg_v_val = stats_v['goles_favor']
+                    stats_h = get_team_stats(api_key, league_id, season, id_home)
+                    stats_v = get_team_stats(api_key, league_id, season, id_away)
+                    
+                    if stats_h and stats_v:
+                        # --- CÁLCULOS ---
+                        matriz = matriz_dixon_coles(stats_h['goles'], stats_v['goles'])
+                        
+                        # Resultados
+                        st.header(f"Análisis: {sel_match}")
+                        col1, col2, col3 = st.columns(3)
+                        
+                        # Probabilidades
+                        p_over = (1 - sum(matriz[i][j] for i in range(7) for j in range(7) if i+j < 2.5)) * 100
+                        p_btts = (1 - (matriz[0,:].sum() + matriz[:,0].sum() - matriz[0,0])) * 100
+                        p_home = np.tril(matriz, -1).sum() * 100
+                        
+                        col1.metric("Prob. Over 2.5", f"{round(p_over, 1)}%")
+                        col2.metric("Ambos Anotan", f"{round(p_btts, 1)}%")
+                        col3.metric(f"Victoria {match_data['teams']['home']['name']}", f"{round(p_home, 1)}%")
+                        
+                        # Datos extraídos automáticamente
+                        st.subheader("📊 Datos Extraídos Automáticamente")
+                        st.write(f"Promedio Goles {match_data['teams']['home']['name']}: **{stats_h['goles']}**")
+                        st.write(f"Promedio Goles {match_data['teams']['away']['name']}: **{stats_v['goles']}**")
                     else:
-                        st.sidebar.error(f"Error: {msg_l} / {msg_v}")
-                        xg_l_val, xg_v_val = 1.6, 1.2
-            else:
-                st.sidebar.warning("Faltan datos de la API.")
-                xg_l_val, xg_v_val = 1.6, 1.2
+                        st.error("No hay suficientes estadísticas para este partido en la API.")
+        else:
+            st.sidebar.warning("No hay partidos próximos para esta liga.")
     else:
-        xg_l_val, xg_v_val = 1.6, 1.2
+        st.sidebar.error("No se pudieron cargar las ligas. Revisa tu API Key.")
+else:
+    st.info("Por favor, ingresa tu API Key en la barra lateral para comenzar.")
 
-    st.sidebar.divider()
-    st.sidebar.header("📊 Ingreso Manual / Ajustes")
-    col_sf1, col_sf2 = st.sidebar.columns(2)
-    with col_sf1:
-        st.subheader("Local")
-        xg_l = st.number_input("xG L", value=float(xg_l_val), step=0.1)
-        cl = st.number_input("Córners L", value=5.5, step=0.1)
-        dl = st.number_input("Remates L", value=12.0, step=0.5)
-        dpl = st.number_input("A Puerta L", value=4.5, step=0.1)
-    with col_sf2:
-        st.subheader("Visita")
-        xg_v = st.number_input("xG V", value=float(xg_v_val), step=0.1)
-        cv = st.number_input("Córners V", value=4.2, step=0.1)
-        dv = st.number_input("Remates V", value=10.0, step=0.5)
-        dpv = st.number_input("A Puerta V", value=3.2, step=0.1)
-
-    st.title("⚡ Dashboard de Análisis Cuantitativo")
-    
-    tab_futbol, tab_baloncesto = st.tabs(["⚽ Fútbol", "🏀 Baloncesto"])
-    
-    with tab_futbol:
-        sub_goles, sub_corners, sub_remates = st.tabs(["🥅 Goles", "🚩 Córners", "👟 Remates y Puerta"])
-        
-        with sub_goles:
-            linea_g = st.select_slider("Línea de Goles", options=[i/2 for i in range(1, 13)], value=2.5)
-            matriz = matriz_dixon_coles(xg_l, xg_v)
-            prob_under_g = sum(matriz[i][j] for i in range(len(matriz)) for j in range(len(matriz)) if i + j < linea_g)
-            
-            cg1, cg2, cg3 = st.columns(3)
-            cg1.metric(f"Over {linea_g}", f"{round((1-prob_under_g)*100, 2)}%")
-            cg2.metric(f"Under {linea_g}", f"{round(prob_under_g*100, 2)}%")
-            btts_si = (1 - (matriz[0, :].sum() + matriz[:, 0].sum() - matriz[0,0])) * 100
-            cg3.metric("Ambos Anotan (Sí)", f"{round(btts_si, 2)}%")
-
-        with sub_corners:
-            linea_c = st.select_slider("Línea Córners Totales", options=[i/2 for i in range(10, 31)], value=9.5)
-            u_c, o_c = calcular_poisson_ou(cl + cv, linea_c)
-            cc1, cc2 = st.columns(2)
-            cc1.metric(f"Over {linea_c}", f"{o_c}%")
-            cc2.metric(f"Under {linea_c}", f"{u_c}%")
-
-        with sub_remates:
-            linea_d = st.select_slider("Línea Remates Totales", options=[i/2 for i in range(30, 71)], value=24.5)
-            u_d, o_d = calcular_poisson_ou(dl + dv, linea_d)
-            st.metric(f"Total Over {linea_d}", f"{o_d}%")
-            
-            st.divider()
-            c_puerta1, c_puerta2 = st.columns(2)
-            with c_puerta1:
-                l_dpl = st.select_slider("Línea Puerta Local", options=[i/2 for i in range(2, 17)], value=4.5)
-                u_dpl, o_dpl = calcular_poisson_ou(dpl, l_dpl)
-                st.metric(f"Local Over {l_dpl}", f"{o_dpl}%")
-            with c_puerta2:
-                l_dpv = st.select_slider("Línea Puerta Visita", options=[i/2 for i in range(2, 17)], value=3.5)
-                u_dpv, o_dpv = calcular_poisson_ou(dpv, l_dpv)
-                st.metric(f"Visita Over {l_dpv}", f"{o_dpv}%")
-
-    with tab_baloncesto:
-        st.header("Player Props")
-        col_b1, col_b2, col_b3 = st.columns(3)
-        promedio_jugador = col_b1.number_input("Promedio Pts", value=22.5)
-        desviacion_std = col_b2.number_input("Desv. Estándar", value=4.5)
-        linea_prop = col_b3.select_slider("Línea Casa", options=[i/2 for i in range(10, 81)], value=23.5)
-            
-        u_prop, o_prop = prop_baloncesto_norm(promedio_jugador, desviacion_std, linea_prop)
-        cb1, cb2 = st.columns(2)
-        cb1.metric(f"Over {linea_prop}", f"{o_prop}%")
-        cb2.metric(f"Under {linea_prop}", f"{u_prop}%")
-
-    # --- FOOTER ---
-    st.markdown("---")
-    st.markdown("""
-        <div style='text-align: center; color: #888; padding: 20px;'>
-            <p style='font-size: 16px;'>Creado por <strong>Andres Araya</strong> | ⚡ Predictor Estadístico PRO</p>
-        </div>
-    """, unsafe_allow_html=True)
+st.markdown("---")
+st.markdown("<p style='text-align: center;'>Creado por <strong>Andres Araya</strong> | Edición Comercial Automatizada</p>", unsafe_allow_html=True)
