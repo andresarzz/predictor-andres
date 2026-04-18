@@ -1,12 +1,13 @@
 import streamlit as st
 import numpy as np
+import requests
 from scipy.stats import poisson, norm
 import plotly.graph_objects as go
 
 # --- CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(page_title="Predictor Elite PRO", page_icon="🔒", layout="wide")
 
-# --- SISTEMA DE SESIÓN (LOGIN FALSO PARA DEMO) ---
+# --- SISTEMA DE SESIÓN (LOGIN) ---
 if 'logueado' not in st.session_state:
     st.session_state.logueado = False
 
@@ -35,8 +36,41 @@ def prop_baloncesto_norm(promedio, desviacion, linea):
     prob_under = norm.cdf(linea, loc=promedio, scale=desviacion)
     return round(prob_under * 100, 2), round((1 - prob_under) * 100, 2)
 
+# --- FUNCIÓN DE CONEXIÓN A API-FOOTBALL ---
+def obtener_stats_equipo(api_key, league_id, season, team_id):
+    """Extrae las estadísticas promedio de un equipo desde API-Football."""
+    url = f"https://v3.football.api-sports.io/teams/statistics?league={league_id}&season={season}&team={team_id}"
+    headers = {
+        'x-rapidapi-host': "v3.football.api-sports.io",
+        'x-rapidapi-key': api_key
+    }
+    
+    try:
+        response = requests.get(url, headers=headers)
+        data = response.json()
+        
+        if data['errors']:
+            return None, "Error en la API o Key inválida."
+            
+        stats = data['response']
+        # Partidos jugados para sacar promedios
+        partidos = stats['fixtures']['played']['total']
+        if partidos == 0: return None, "El equipo no ha jugado partidos."
+        
+        # Extraer totales y promediar
+        goles_favor = stats['goals']['for']['total']['total']
+        goles_contra = stats['goals']['against']['total']['total']
+        
+        promedios = {
+            'goles_favor': round(goles_favor / partidos, 2),
+            'goles_contra': round(goles_contra / partidos, 2)
+        }
+        return promedios, "Éxito"
+    except Exception as e:
+        return None, str(e)
+
 # ==========================================
-# PANTALLA DE LOGIN (PAYWALL)
+# PANTALLA DE LOGIN
 # ==========================================
 if not st.session_state.logueado:
     st.markdown("<h1 style='text-align: center;'>⚡ Predictor Elite Analytics</h1>", unsafe_allow_html=True)
@@ -48,7 +82,6 @@ if not st.session_state.logueado:
         usuario = st.text_input("Usuario")
         password = st.text_input("Contraseña", type="password")
         
-        # Para tu demo, cualquier contraseña entrará. En el futuro aquí va Stripe/Firebase.
         if st.button("Iniciar Sesión", use_container_width=True):
             st.session_state.logueado = True
             st.rerun()
@@ -56,42 +89,72 @@ if not st.session_state.logueado:
     st.markdown("---")
     st.markdown("""
     <div style='text-align: center; color: #888;'>
-        <p style='font-size: 14px;'>Desarrollado con motor Dixon-Coles y Monte Carlo</p>
         <p style='font-size: 14px;'>Creado por <strong>Andres Araya</strong> | © 2026</p>
     </div>
     """, unsafe_allow_html=True)
 
 # ==========================================
-# INTERFAZ PRINCIPAL (SOLO PARA USUARIOS VIP)
+# INTERFAZ PRINCIPAL (VIP)
 # ==========================================
 else:
-    st.sidebar.success("✅ Sesión Iniciada (Suscripción Activa)")
+    st.sidebar.success("✅ Sesión Iniciada")
     if st.sidebar.button("Cerrar Sesión"):
         st.session_state.logueado = False
         st.rerun()
 
-    st.sidebar.header("⚙️ Automatización (Próximamente)")
-    st.sidebar.selectbox("Seleccionar Partido en Vivo", ["Ingresar datos manualmente...", "Real Madrid vs Barcelona (API Lock)", "Arsenal vs Chelsea (API Lock)"], disabled=True, help="Esta función requiere integración de API.")
+    # --- MÓDULO DE EXTRACCIÓN API ---
+    st.sidebar.header("📡 Automatización API-Football")
+    usar_api = st.sidebar.checkbox("Usar extracción automática")
     
+    if usar_api:
+        api_key_user = st.sidebar.text_input("Tu API Key", type="password")
+        st.sidebar.caption("Ejemplo: Premier League = 39, Temporada = 2025")
+        col_api1, col_api2 = st.sidebar.columns(2)
+        league = col_api1.text_input("ID Liga", value="39")
+        season = col_api2.text_input("Año", value="2025")
+        
+        team_l = st.sidebar.text_input("ID Equipo Local (Ej: 33 para Man Utd)")
+        team_v = st.sidebar.text_input("ID Equipo Visita (Ej: 34 para Newcastle)")
+        
+        if st.sidebar.button("Extraer Datos Reales"):
+            if api_key_user and team_l and team_v:
+                with st.spinner("Conectando con API-Football..."):
+                    stats_l, msg_l = obtener_stats_equipo(api_key_user, league, season, team_l)
+                    stats_v, msg_v = obtener_stats_equipo(api_key_user, league, season, team_v)
+                    
+                    if stats_l and stats_v:
+                        st.sidebar.success("Datos extraídos con éxito. xG actualizado.")
+                        # Usamos los goles promedio de la API para alimentar el modelo
+                        xg_l_val = stats_l['goles_favor']
+                        xg_v_val = stats_v['goles_favor']
+                    else:
+                        st.sidebar.error(f"Error: {msg_l} / {msg_v}")
+                        xg_l_val, xg_v_val = 1.6, 1.2
+            else:
+                st.sidebar.warning("Faltan datos de la API.")
+                xg_l_val, xg_v_val = 1.6, 1.2
+    else:
+        xg_l_val, xg_v_val = 1.6, 1.2
+
     st.sidebar.divider()
-    st.sidebar.header("📊 Ingreso Manual de xG")
+    st.sidebar.header("📊 Ingreso Manual / Ajustes")
     col_sf1, col_sf2 = st.sidebar.columns(2)
     with col_sf1:
         st.subheader("Local")
-        xg_l = st.number_input("xG L", value=1.6, step=0.1)
+        xg_l = st.number_input("xG L", value=float(xg_l_val), step=0.1)
         cl = st.number_input("Córners L", value=5.5, step=0.1)
         dl = st.number_input("Remates L", value=12.0, step=0.5)
         dpl = st.number_input("A Puerta L", value=4.5, step=0.1)
     with col_sf2:
         st.subheader("Visita")
-        xg_v = st.number_input("xG V", value=1.2, step=0.1)
+        xg_v = st.number_input("xG V", value=float(xg_v_val), step=0.1)
         cv = st.number_input("Córners V", value=4.2, step=0.1)
         dv = st.number_input("Remates V", value=10.0, step=0.5)
         dpv = st.number_input("A Puerta V", value=3.2, step=0.1)
 
     st.title("⚡ Dashboard de Análisis Cuantitativo")
     
-    tab_futbol, tab_baloncesto, tab_backtest = st.tabs(["⚽ Fútbol", "🏀 Baloncesto", "📈 Backtesting (Próximamente)"])
+    tab_futbol, tab_baloncesto = st.tabs(["⚽ Fútbol", "🏀 Baloncesto"])
     
     with tab_futbol:
         sub_goles, sub_corners, sub_remates = st.tabs(["🥅 Goles", "🚩 Córners", "👟 Remates y Puerta"])
@@ -141,9 +204,6 @@ else:
         cb1, cb2 = st.columns(2)
         cb1.metric(f"Over {linea_prop}", f"{o_prop}%")
         cb2.metric(f"Under {linea_prop}", f"{u_prop}%")
-        
-    with tab_backtest:
-        st.info("📊 Módulo de Backtesting Histórico en desarrollo. Próximamente los usuarios podrán evaluar la rentabilidad del sistema contra 50,000 partidos históricos.")
 
     # --- FOOTER ---
     st.markdown("---")
