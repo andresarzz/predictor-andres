@@ -28,18 +28,17 @@ def matriz_dixon_coles(lambda_l, lambda_v, rho=-0.15, max_goles=6):
             matriz[i][j] = max(0, prob_base * ajuste)
     return matriz / matriz.sum()
 
-# --- FUNCIONES DE API (ARQUITECTURA POR FECHA) ---
+# --- FUNCIONES DE API (BLINDADAS) ---
 def call_api(endpoint, api_key, params=None):
     url = f"https://v3.football.api-sports.io/{endpoint}"
     headers = {'x-rapidapi-host': "v3.football.api-sports.io", 'x-rapidapi-key': api_key}
     try:
         response = requests.get(url, headers=headers, params=params)
         return response.json()
-    except Exception as e:
+    except Exception:
         return None
 
 def get_fixtures_by_date(api_key, date_str):
-    """Extrae todos los partidos del mundo para una fecha específica."""
     data = call_api("fixtures", api_key, {"date": date_str})
     if data and 'response' in data:
         if len(data['response']) == 0:
@@ -49,30 +48,45 @@ def get_fixtures_by_date(api_key, date_str):
             league = item['league']['name']
             home = item['teams']['home']['name']
             away = item['teams']['away']['name']
-            # Formato: "Premier League | Arsenal vs Chelsea"
             match_name = f"[{league}] {home} vs {away}"
             matches[match_name] = item
         return matches
     return {}
 
 def get_team_stats(api_key, league_id, season, team_id):
-    """Extrae las métricas de un equipo en la temporada exacta del partido."""
+    """Extrae métricas con escudo anti-errores (TypeError handling)"""
     data = call_api("teams/statistics", api_key, {"league": league_id, "season": season, "team": team_id})
-    if data and 'response' in data:
-        s = data['response']
+    
+    if not data or 'response' not in data:
+        return None
+        
+    s = data['response']
+    
+    # SOLUCIÓN AL ERROR: Validar si la API devolvió una lista vacía [] o datos corruptos
+    if not s or isinstance(s, list) or 'fixtures' not in s:
+        return None
+        
+    try:
         pj = s['fixtures']['played']['total']
-        if pj == 0: return None
+        if not pj or pj == 0: 
+            return None
+            
+        # Extracción segura del promedio de goles
+        avg_goles = s['goals']['for']['average']['total']
+        goles_float = float(avg_goles) if avg_goles is not None else 1.0
         
         return {
-            "goles": float(s['goals']['for']['average']['total']),
-            "corners": 5.5, # Dato estándar en caso de no venir en el tier gratuito
+            "goles": goles_float,
+            "corners": 5.5, 
             "remates_totales": 12.0,
             "remates_puerta": 4.5
         }
-    return None
+    except (TypeError, ValueError, KeyError):
+        # Si cualquier dato interno falta, bloquea la caída y retorna None
+        return None
 
 # --- INTERFAZ PRINCIPAL ---
-st.title("🚀 Predictor Automático SaaS v5.2")
+st.title("🚀 Predictor Automático SaaS v5.2.1")
 st.markdown("Buscador global de partidos por fecha en tiempo real.")
 
 # --- BARRA LATERAL: FLUJO AUTOMATIZADO ---
@@ -82,7 +96,6 @@ api_key = st.sidebar.text_input("Ingresa tu API Key (API-Football)", type="passw
 if api_key:
     st.sidebar.divider()
     st.sidebar.header("📅 1. Selecciona la Fecha")
-    # Calendario interactivo (por defecto hoy)
     fecha_seleccionada = st.sidebar.date_input("Fecha de los partidos", datetime.today())
     fecha_str = fecha_seleccionada.strftime("%Y-%m-%d")
     
@@ -93,7 +106,6 @@ if api_key:
         st.sidebar.success(f"Se encontraron {len(fixtures_dict)} partidos.")
         st.sidebar.header("⚽ 2. Selecciona el Partido")
         
-        # El selectbox de Streamlit permite escribir para buscar rápido
         sel_match = st.sidebar.selectbox("Escribe el equipo para buscar...", list(fixtures_dict.keys()))
         match_data = fixtures_dict[sel_match]
         
@@ -114,7 +126,7 @@ if api_key:
                         'stats_v': stats_v
                     }
                 else:
-                    st.sidebar.error("Las estadísticas de estos equipos aún no están disponibles para esta temporada.")
+                    st.sidebar.error("⚠️ La API no tiene estadísticas suficientes para esta temporada o copa específica. Intenta con otro partido.")
     else:
         st.sidebar.warning(f"No hay partidos programados para el {fecha_str}.")
 else:
