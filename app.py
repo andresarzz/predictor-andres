@@ -5,7 +5,7 @@ from scipy.stats import poisson
 from datetime import datetime
 
 # --- CONFIGURACIÓN DE LA PÁGINA ---
-st.set_page_config(page_title="Predictor Automático PRO", layout="wide")
+st.set_page_config(page_title="Predictor Automático PRO (DEBUG)", layout="wide")
 
 # --- FUNCIONES MATEMÁTICAS ---
 def calcular_poisson_ou(esperado, linea):
@@ -28,21 +28,25 @@ def matriz_dixon_coles(lambda_l, lambda_v, rho=-0.15, max_goles=6):
             matriz[i][j] = max(0, prob_base * ajuste)
     return matriz / matriz.sum()
 
-# --- FUNCIONES DE API (SÚPER BLINDADAS) ---
+# --- FUNCIONES DE API (MODO DEBUG) ---
 def call_api(endpoint, api_key, params=None):
     url = f"https://v3.football.api-sports.io/{endpoint}"
-    headers = {'x-rapidapi-host': "v3.football.api-sports.io", 'x-rapidapi-key': api_key}
+    # Agregamos ambos headers por si creaste la cuenta en el dashboard oficial o en RapidAPI
+    headers = {
+        'x-apisports-key': api_key, 
+        'x-rapidapi-key': api_key,
+        'x-rapidapi-host': "v3.football.api-sports.io"
+    }
     try:
         response = requests.get(url, headers=headers, params=params)
         return response.json()
-    except Exception:
-        return None
+    except Exception as e:
+        return {"errors": f"Error crítico de red: {e}"}
 
 def get_fixtures_by_date(api_key, date_str):
     data = call_api("fixtures", api_key, {"date": date_str})
     if data and 'response' in data:
-        if len(data['response']) == 0:
-            return {}
+        if len(data['response']) == 0: return {}
         matches = {}
         for item in data['response']:
             league = item['league']['name']
@@ -54,67 +58,64 @@ def get_fixtures_by_date(api_key, date_str):
     return {}
 
 def get_team_stats(api_key, league_id, season, team_id):
-    """Maneja el infame error de lista vacía de API-Football."""
-    data = call_api("teams/statistics", api_key, {"league": league_id, "season": season, "team": team_id})
+    """Función de rayos X: Mostrará exactamente qué falla."""
+    params = {"league": league_id, "season": season, "team": team_id}
+    data = call_api("teams/statistics", api_key, params)
     
-    if not data or 'response' not in data:
-        return None, "Sin respuesta del servidor."
+    # 1. Verificar si la API envía errores explícitos (ej. límites de cuenta)
+    if 'errors' in data and data['errors']:
+        return None, f"ERROR DE LA API: {data['errors']}"
         
-    s = data['response']
+    s = data.get('response')
     
-    # AQUÍ ESTÁ LA MAGIA: Si API-Football devuelve [] (lista vacía), lo atrapamos.
-    if isinstance(s, list) and len(s) == 0:
-        return None, f"La API no tiene estadísticas para este equipo en la temporada {season} (Suele pasar en Copas o inicios de torneo)."
+    # 2. Verificar si la respuesta está vacía (El error que te está pasando)
+    if not s or (isinstance(s, list) and len(s) == 0):
+        return None, f"API ENVIÓ VACÍO []. Parámetros buscados -> Liga ID: {league_id} | Temporada: {season} | Equipo ID: {team_id}"
         
-    if not s or 'fixtures' not in s:
-        return None, "Estructura de datos incompleta desde la API."
-        
+    # 3. Intentar extraer los datos de forma ultra segura
     try:
-        pj = s['fixtures']['played']['total']
-        if not pj or pj == 0: 
-            return None, f"El equipo tiene 0 partidos jugados registrados en la temporada {season}."
-            
-        avg_goles = s['goals']['for']['average']['total']
-        goles_float = float(avg_goles) if avg_goles is not None else 1.0
+        # Usamos .get() para que si falta un dato, no colapse, sino que asigne 1.0 por defecto
+        avg_tot = s.get('goals', {}).get('for', {}).get('average', {}).get('total', 1.0)
+        
+        # Si la API envía 'None' (null) en los goles, lo forzamos a 1.0 para que no crashee
+        if avg_tot is None: avg_tot = 1.0 
         
         return {
-            "goles": goles_float,
+            "goles": float(avg_tot),
             "corners": 5.5, 
             "remates_totales": 12.0,
             "remates_puerta": 4.5
         }, "OK"
     except Exception as e:
-        return None, f"Error leyendo datos: {e}"
+        return None, f"ERROR AL LEER EL JSON: {e}. Datos recibidos: {s}"
 
 # --- INTERFAZ PRINCIPAL ---
-st.title("🚀 Predictor Automático SaaS v5.4")
+st.title("🚀 Predictor SaaS (Diagnóstico de API)")
 
-# --- BARRA LATERAL: FLUJO AUTOMATIZADO ---
 st.sidebar.header("🔑 Conexión al Servidor")
-api_key = st.sidebar.text_input("Ingresa tu API Key (API-Football)", type="password")
+api_key = st.sidebar.text_input("Ingresa tu API Key", type="password")
 
 if api_key:
     st.sidebar.divider()
     st.sidebar.header("📅 1. Selecciona la Fecha")
-    fecha_seleccionada = st.sidebar.date_input("Fecha de los partidos", datetime.today())
+    fecha_seleccionada = st.sidebar.date_input("Fecha", datetime.today())
     fecha_str = fecha_seleccionada.strftime("%Y-%m-%d")
     
-    with st.spinner(f"Buscando partidos para el {fecha_str}..."):
+    with st.spinner(f"Buscando partidos..."):
         fixtures_dict = get_fixtures_by_date(api_key, fecha_str)
         
     if fixtures_dict:
         st.sidebar.success(f"Se encontraron {len(fixtures_dict)} partidos.")
         st.sidebar.header("⚽ 2. Selecciona el Partido")
         
-        sel_match = st.sidebar.selectbox("Escribe el equipo para buscar...", list(fixtures_dict.keys()))
+        sel_match = st.sidebar.selectbox("Escribe el equipo...", list(fixtures_dict.keys()))
         match_data = fixtures_dict[sel_match]
         
-        # --- NUEVO: SELECTOR DE TEMPORADA ---
-        st.sidebar.caption("¿La API falló por ser Copa o inicio de torneo? Fuerza el escaneo en una temporada anterior:")
-        temporada_override = st.sidebar.number_input("Temporada a Escanear", min_value=2020, max_value=2026, value=int(match_data['league']['season']), step=1)
+        st.sidebar.caption("Override de Temporada (Modifícalo si falla):")
+        temporada_override = st.sidebar.number_input("Temporada a Escanear", min_value=2015, max_value=2026, value=int(match_data['league']['season']), step=1)
         
-        if st.sidebar.button("⚡ Analizar Partido", use_container_width=True):
-            with st.spinner(f"Descargando métricas (Temp {temporada_override})..."):
+        if st.sidebar.button("⚡ Analizar y Diagnosticar", use_container_width=True):
+            with st.spinner("Conectando con servidores..."):
                 id_home = match_data['teams']['home']['id']
                 id_away = match_data['teams']['away']['id']
                 league_id = match_data['league']['id']
@@ -124,33 +125,33 @@ if api_key:
                 
                 if stats_h and stats_v:
                     st.session_state['datos_partido'] = {
-                        'match_name': f"{sel_match} (Basado en Temp. {temporada_override})",
+                        'match_name': f"{sel_match}",
                         'stats_h': stats_h,
                         'stats_v': stats_v,
-                        'api_status': 'success'
+                        'api_status': 'success',
+                        'debug_msg': 'Todo correcto'
                     }
                 else:
-                    st.sidebar.error("⚠️ La API devolvió datos vacíos para esta temporada:")
-                    st.sidebar.caption(f"Local: {msg_h}")
-                    st.sidebar.caption(f"Visita: {msg_v}")
+                    # Guardamos el mensaje de diagnóstico para mostrarlo en grande
                     st.session_state['datos_partido'] = {
-                        'match_name': f"{sel_match} (MODO MANUAL REQUERIDO)",
+                        'match_name': f"{sel_match} (MODO MANUAL)",
                         'stats_h': {"goles": 1.5, "corners": 5.0, "remates_totales": 10.0, "remates_puerta": 4.0},
                         'stats_v': {"goles": 1.5, "corners": 5.0, "remates_totales": 10.0, "remates_puerta": 4.0},
-                        'api_status': 'failed'
+                        'api_status': 'failed',
+                        'debug_msg': f"LOCAL: {msg_h} \n\n VISITA: {msg_v}"
                     }
     else:
-        st.sidebar.warning(f"No hay partidos programados para el {fecha_str}.")
-else:
-    st.sidebar.info("Ingresa tu API Key para cargar el calendario.")
+        st.sidebar.warning(f"No hay partidos programados.")
 
-# --- MOSTRAR RESULTADOS Y MODO MANUAL ---
+# --- MOSTRAR RESULTADOS Y DIAGNÓSTICO ---
 if 'datos_partido' in st.session_state:
     datos = st.session_state['datos_partido']
     st.header(f"📊 {datos['match_name']}")
     
     if datos['api_status'] == 'failed':
-        st.warning("⚠️ Sin datos en la API. Puedes intentar cambiar la 'Temporada a Escanear' a 2025 o 2024 en la barra lateral, o ingresar el xG a mano aquí:")
+        st.error("🚨 REPORTE DEL SERVIDOR API-FOOTBALL (Copia esto si el error persiste):")
+        st.code(datos['debug_msg'])
+        st.warning("⚠️ Ingresa los promedios manualmente abajo para continuar.")
         col_m1, col_m2 = st.columns(2)
         xg_l = col_m1.number_input("xG Local Manual", value=1.50, step=0.1)
         xg_v = col_m2.number_input("xG Visita Manual", value=1.50, step=0.1)
