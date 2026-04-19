@@ -2,6 +2,7 @@ import streamlit as st
 import numpy as np
 import requests
 from scipy.stats import poisson
+from datetime import datetime
 
 # --- CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(page_title="Predictor Automático PRO", layout="wide")
@@ -27,89 +28,97 @@ def matriz_dixon_coles(lambda_l, lambda_v, rho=-0.15, max_goles=6):
             matriz[i][j] = max(0, prob_base * ajuste)
     return matriz / matriz.sum()
 
-# --- FUNCIONES DE API (CORREGIDAS) ---
+# --- FUNCIONES DE API (ARQUITECTURA POR FECHA) ---
 def call_api(endpoint, api_key, params=None):
     url = f"https://v3.football.api-sports.io/{endpoint}"
     headers = {'x-rapidapi-host': "v3.football.api-sports.io", 'x-rapidapi-key': api_key}
     try:
         response = requests.get(url, headers=headers, params=params)
         return response.json()
-    except:
+    except Exception as e:
         return None
 
-def get_leagues(api_key):
-    # Trae las ligas que están activas actualmente
-    data = call_api("leagues", api_key, {"current": "true"})
-    if data and 'response' in data:
-        return {item['league']['name']: item['league']['id'] for item in data['response']}
-    return {}
-
-def get_fixtures(api_key, league_id):
-    # CORRECCIÓN: Se elimina 'season'. Solo pedimos los próximos 10 partidos de la liga.
-    data = call_api("fixtures", api_key, {"league": league_id, "next": 10})
+def get_fixtures_by_date(api_key, date_str):
+    """Extrae todos los partidos del mundo para una fecha específica."""
+    data = call_api("fixtures", api_key, {"date": date_str})
     if data and 'response' in data:
         if len(data['response']) == 0:
             return {}
-        return {f"{item['teams']['home']['name']} vs {item['teams']['away']['name']}": item for item in data['response']}
+        matches = {}
+        for item in data['response']:
+            league = item['league']['name']
+            home = item['teams']['home']['name']
+            away = item['teams']['away']['name']
+            # Formato: "Premier League | Arsenal vs Chelsea"
+            match_name = f"[{league}] {home} vs {away}"
+            matches[match_name] = item
+        return matches
     return {}
 
 def get_team_stats(api_key, league_id, season, team_id):
+    """Extrae las métricas de un equipo en la temporada exacta del partido."""
     data = call_api("teams/statistics", api_key, {"league": league_id, "season": season, "team": team_id})
     if data and 'response' in data:
         s = data['response']
         pj = s['fixtures']['played']['total']
         if pj == 0: return None
         
-        # Extraemos los promedios reales de la API
         return {
             "goles": float(s['goals']['for']['average']['total']),
-            "corners": 5.5, # API Free a veces omite corners, usamos base estándar
+            "corners": 5.5, # Dato estándar en caso de no venir en el tier gratuito
             "remates_totales": 12.0,
             "remates_puerta": 4.5
         }
     return None
 
 # --- INTERFAZ PRINCIPAL ---
-st.title("🚀 Predictor Automático SaaS v5.1")
+st.title("🚀 Predictor Automático SaaS v5.2")
+st.markdown("Buscador global de partidos por fecha en tiempo real.")
 
 # --- BARRA LATERAL: FLUJO AUTOMATIZADO ---
-st.sidebar.header("🔑 Extracción Automática")
+st.sidebar.header("🔑 Conexión al Servidor")
 api_key = st.sidebar.text_input("Ingresa tu API Key (API-Football)", type="password")
 
 if api_key:
-    leagues_dict = get_leagues(api_key)
-    if leagues_dict:
-        sel_league_name = st.sidebar.selectbox("1. Elige una Liga", list(leagues_dict.keys()))
-        league_id = leagues_dict[sel_league_name]
+    st.sidebar.divider()
+    st.sidebar.header("📅 1. Selecciona la Fecha")
+    # Calendario interactivo (por defecto hoy)
+    fecha_seleccionada = st.sidebar.date_input("Fecha de los partidos", datetime.today())
+    fecha_str = fecha_seleccionada.strftime("%Y-%m-%d")
+    
+    with st.spinner(f"Buscando partidos para el {fecha_str}..."):
+        fixtures_dict = get_fixtures_by_date(api_key, fecha_str)
         
-        fixtures_dict = get_fixtures(api_key, league_id)
-        if fixtures_dict:
-            sel_match = st.sidebar.selectbox("2. Selecciona el Partido", list(fixtures_dict.keys()))
-            match_data = fixtures_dict[sel_match]
-            
-            if st.sidebar.button("⚡ Analizar Partido", use_container_width=True):
-                with st.spinner("Extrayendo métricas de los servidores..."):
-                    id_home = match_data['teams']['home']['id']
-                    id_away = match_data['teams']['away']['id']
-                    season = match_data['league']['season'] # Tomamos la temporada exacta del partido
-                    
-                    stats_h = get_team_stats(api_key, league_id, season, id_home)
-                    stats_v = get_team_stats(api_key, league_id, season, id_away)
-                    
-                    if stats_h and stats_v:
-                        st.session_state['datos_partido'] = {
-                            'match_name': sel_match,
-                            'stats_h': stats_h,
-                            'stats_v': stats_v
-                        }
-                    else:
-                        st.sidebar.error("Datos insuficientes en la API para este partido.")
-        else:
-            st.sidebar.warning("No hay partidos próximos programados para esta liga.")
+    if fixtures_dict:
+        st.sidebar.success(f"Se encontraron {len(fixtures_dict)} partidos.")
+        st.sidebar.header("⚽ 2. Selecciona el Partido")
+        
+        # El selectbox de Streamlit permite escribir para buscar rápido
+        sel_match = st.sidebar.selectbox("Escribe el equipo para buscar...", list(fixtures_dict.keys()))
+        match_data = fixtures_dict[sel_match]
+        
+        if st.sidebar.button("⚡ Analizar Partido Seleccionado", use_container_width=True):
+            with st.spinner("Descargando métricas y calculando Poisson..."):
+                id_home = match_data['teams']['home']['id']
+                id_away = match_data['teams']['away']['id']
+                league_id = match_data['league']['id']
+                season = match_data['league']['season'] 
+                
+                stats_h = get_team_stats(api_key, league_id, season, id_home)
+                stats_v = get_team_stats(api_key, league_id, season, id_away)
+                
+                if stats_h and stats_v:
+                    st.session_state['datos_partido'] = {
+                        'match_name': sel_match,
+                        'stats_h': stats_h,
+                        'stats_v': stats_v
+                    }
+                else:
+                    st.sidebar.error("Las estadísticas de estos equipos aún no están disponibles para esta temporada.")
     else:
-        st.sidebar.error("Error al conectar. Verifica tu API Key.")
+        st.sidebar.warning(f"No hay partidos programados para el {fecha_str}.")
 else:
-    st.sidebar.info("Ingresa tu API Key para cargar las ligas.")
+    st.sidebar.info("Ingresa tu API Key para cargar el calendario de partidos.")
 
 # --- MOSTRAR RESULTADOS SI HAY DATOS EN SESIÓN ---
 if 'datos_partido' in st.session_state:
@@ -119,7 +128,7 @@ if 'datos_partido' in st.session_state:
     xg_l = datos['stats_h']['goles']
     xg_v = datos['stats_v']['goles']
     
-    st.markdown(f"**xG Promedio Asignado:** Local ({xg_l}) | Visita ({xg_v})")
+    st.markdown(f"**xG Promedio Extraído:** Local ({xg_l}) | Visita ({xg_v})")
     st.divider()
 
     sub_goles, sub_corners, sub_remates = st.tabs(["🥅 Goles", "🚩 Córners", "👟 Remates y Puerta"])
