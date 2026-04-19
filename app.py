@@ -28,7 +28,7 @@ def matriz_dixon_coles(lambda_l, lambda_v, rho=-0.15, max_goles=6):
             matriz[i][j] = max(0, prob_base * ajuste)
     return matriz / matriz.sum()
 
-# --- FUNCIONES DE API (BLINDADAS) ---
+# --- FUNCIONES DE API (SÚPER BLINDADAS) ---
 def call_api(endpoint, api_key, params=None):
     url = f"https://v3.football.api-sports.io/{endpoint}"
     headers = {'x-rapidapi-host': "v3.football.api-sports.io", 'x-rapidapi-key': api_key}
@@ -54,24 +54,26 @@ def get_fixtures_by_date(api_key, date_str):
     return {}
 
 def get_team_stats(api_key, league_id, season, team_id):
-    """Extrae métricas con escudo anti-errores (TypeError handling)"""
+    """Maneja el infame error de lista vacía de API-Football."""
     data = call_api("teams/statistics", api_key, {"league": league_id, "season": season, "team": team_id})
     
     if not data or 'response' not in data:
-        return None
+        return None, "Sin respuesta del servidor."
         
     s = data['response']
     
-    # SOLUCIÓN AL ERROR: Validar si la API devolvió una lista vacía [] o datos corruptos
-    if not s or isinstance(s, list) or 'fixtures' not in s:
-        return None
+    # AQUÍ ESTÁ LA MAGIA: Si API-Football devuelve [] (lista vacía), lo atrapamos.
+    if isinstance(s, list) and len(s) == 0:
+        return None, f"La API no tiene estadísticas para este equipo en la temporada {season} (Suele pasar en Copas o inicios de torneo)."
+        
+    if not s or 'fixtures' not in s:
+        return None, "Estructura de datos incompleta desde la API."
         
     try:
         pj = s['fixtures']['played']['total']
         if not pj or pj == 0: 
-            return None
+            return None, f"El equipo tiene 0 partidos jugados registrados en la temporada {season}."
             
-        # Extracción segura del promedio de goles
         avg_goles = s['goals']['for']['average']['total']
         goles_float = float(avg_goles) if avg_goles is not None else 1.0
         
@@ -80,14 +82,12 @@ def get_team_stats(api_key, league_id, season, team_id):
             "corners": 5.5, 
             "remates_totales": 12.0,
             "remates_puerta": 4.5
-        }
-    except (TypeError, ValueError, KeyError):
-        # Si cualquier dato interno falta, bloquea la caída y retorna None
-        return None
+        }, "OK"
+    except Exception as e:
+        return None, f"Error leyendo datos: {e}"
 
 # --- INTERFAZ PRINCIPAL ---
-st.title("🚀 Predictor Automático SaaS v5.2.1")
-st.markdown("Buscador global de partidos por fecha en tiempo real.")
+st.title("🚀 Predictor Automático SaaS v5.4")
 
 # --- BARRA LATERAL: FLUJO AUTOMATIZADO ---
 st.sidebar.header("🔑 Conexión al Servidor")
@@ -109,38 +109,56 @@ if api_key:
         sel_match = st.sidebar.selectbox("Escribe el equipo para buscar...", list(fixtures_dict.keys()))
         match_data = fixtures_dict[sel_match]
         
-        if st.sidebar.button("⚡ Analizar Partido Seleccionado", use_container_width=True):
-            with st.spinner("Descargando métricas y calculando Poisson..."):
+        # --- NUEVO: SELECTOR DE TEMPORADA ---
+        st.sidebar.caption("¿La API falló por ser Copa o inicio de torneo? Fuerza el escaneo en una temporada anterior:")
+        temporada_override = st.sidebar.number_input("Temporada a Escanear", min_value=2020, max_value=2026, value=int(match_data['league']['season']), step=1)
+        
+        if st.sidebar.button("⚡ Analizar Partido", use_container_width=True):
+            with st.spinner(f"Descargando métricas (Temp {temporada_override})..."):
                 id_home = match_data['teams']['home']['id']
                 id_away = match_data['teams']['away']['id']
                 league_id = match_data['league']['id']
-                season = match_data['league']['season'] 
                 
-                stats_h = get_team_stats(api_key, league_id, season, id_home)
-                stats_v = get_team_stats(api_key, league_id, season, id_away)
+                stats_h, msg_h = get_team_stats(api_key, league_id, temporada_override, id_home)
+                stats_v, msg_v = get_team_stats(api_key, league_id, temporada_override, id_away)
                 
                 if stats_h and stats_v:
                     st.session_state['datos_partido'] = {
-                        'match_name': sel_match,
+                        'match_name': f"{sel_match} (Basado en Temp. {temporada_override})",
                         'stats_h': stats_h,
-                        'stats_v': stats_v
+                        'stats_v': stats_v,
+                        'api_status': 'success'
                     }
                 else:
-                    st.sidebar.error("⚠️ La API no tiene estadísticas suficientes para esta temporada o copa específica. Intenta con otro partido.")
+                    st.sidebar.error("⚠️ La API devolvió datos vacíos para esta temporada:")
+                    st.sidebar.caption(f"Local: {msg_h}")
+                    st.sidebar.caption(f"Visita: {msg_v}")
+                    st.session_state['datos_partido'] = {
+                        'match_name': f"{sel_match} (MODO MANUAL REQUERIDO)",
+                        'stats_h': {"goles": 1.5, "corners": 5.0, "remates_totales": 10.0, "remates_puerta": 4.0},
+                        'stats_v': {"goles": 1.5, "corners": 5.0, "remates_totales": 10.0, "remates_puerta": 4.0},
+                        'api_status': 'failed'
+                    }
     else:
         st.sidebar.warning(f"No hay partidos programados para el {fecha_str}.")
 else:
-    st.sidebar.info("Ingresa tu API Key para cargar el calendario de partidos.")
+    st.sidebar.info("Ingresa tu API Key para cargar el calendario.")
 
-# --- MOSTRAR RESULTADOS SI HAY DATOS EN SESIÓN ---
+# --- MOSTRAR RESULTADOS Y MODO MANUAL ---
 if 'datos_partido' in st.session_state:
     datos = st.session_state['datos_partido']
     st.header(f"📊 {datos['match_name']}")
     
-    xg_l = datos['stats_h']['goles']
-    xg_v = datos['stats_v']['goles']
+    if datos['api_status'] == 'failed':
+        st.warning("⚠️ Sin datos en la API. Puedes intentar cambiar la 'Temporada a Escanear' a 2025 o 2024 en la barra lateral, o ingresar el xG a mano aquí:")
+        col_m1, col_m2 = st.columns(2)
+        xg_l = col_m1.number_input("xG Local Manual", value=1.50, step=0.1)
+        xg_v = col_m2.number_input("xG Visita Manual", value=1.50, step=0.1)
+    else:
+        xg_l = datos['stats_h']['goles']
+        xg_v = datos['stats_v']['goles']
+        st.success(f"**xG Promedio Extraído por API:** Local ({xg_l}) | Visita ({xg_v})")
     
-    st.markdown(f"**xG Promedio Extraído:** Local ({xg_l}) | Visita ({xg_v})")
     st.divider()
 
     sub_goles, sub_corners, sub_remates = st.tabs(["🥅 Goles", "🚩 Córners", "👟 Remates y Puerta"])
